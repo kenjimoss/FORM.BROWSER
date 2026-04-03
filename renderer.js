@@ -346,6 +346,24 @@ class TabWindow {
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     const border = this.shape === 'circle' ? 24 : 10;
+
+    const v = this.activeVertices;
+    if (v && !this._isRectangular(v)) {
+      // Distorted shape: check distance to each polygon edge in element-local px coords
+      const n = v.length;
+      for (let i = 0; i < n; i++) {
+        const a = v[i], b = v[(i + 1) % n];
+        const ax = a.x * this.size.width,  ay = a.y * this.size.height;
+        const bx = b.x * this.size.width,  by = b.y * this.size.height;
+        const dx = bx - ax, dy = by - ay;
+        const lenSq = dx * dx + dy * dy;
+        const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / lenSq));
+        const nearX = ax + t * dx, nearY = ay + t * dy;
+        if (Math.sqrt((x - nearX) ** 2 + (y - nearY) ** 2) <= border) return true;
+      }
+      return false;
+    }
+
     return x < border || x > rect.width - border ||
            y < border || y > rect.height - border;
   }
