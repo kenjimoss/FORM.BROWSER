@@ -107,6 +107,8 @@ class TabWindow {
     this._ctrlKeyUpHandler   = null;
     this._ctrlOverlay        = null; // full-element overlay active while Ctrl is held (captures events above webview)
     this._ctrlKeyDownHandler = null;
+    this._borderRing         = null; // ring-shaped overlay covering only the polygon border zone
+    this._borderRingSvg      = null; // <svg><defs><clipPath> element for the border ring
     this.createElement();
     this.changeShape(this.shape);
     tabs.push(this);
@@ -558,6 +560,117 @@ class TabWindow {
       `${sel}::after { content:''; position:absolute; inset:-3px; z-index:5; pointer-events:none; background:#4d4d4d; -webkit-mask-size:100% 100%; mask-size:100% 100%; -webkit-mask-repeat:no-repeat; mask-repeat:no-repeat; -webkit-mask-image:${maskUrl}; mask-image:${maskUrl}; }`,
       `${sel}.active::after { background:#333; }`,
     ].join('\n');
+
+    this._updateBorderRing();
+  }
+
+  // Compute an inset polygon by moving each edge inward by d pixels, then finding
+  // adjacent-edge intersections.  Returns normalized {x,y} vertices, or null if the
+  // shape is too small to produce a valid inset.
+  _computeInsetPolygon(verts, W, H, d) {
+    const n = verts.length;
+    const px = verts.map(v => ({ x: v.x * W, y: v.y * H }));
+
+    // Centroid — used to pick the inward-facing normal direction for each edge.
+    const cx = px.reduce((s, p) => s + p.x, 0) / n;
+    const cy = px.reduce((s, p) => s + p.y, 0) / n;
+
+    // Build an offset line for each edge: nx*x + ny*y = c
+    const lines = [];
+    for (let i = 0; i < n; i++) {
+      const a = px[i], b = px[(i + 1) % n];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len < 1e-9) { lines.push(null); continue; }
+      // Unit normal (one of two perpendiculars)
+      let nx = dy / len, ny = -dx / len;
+      // Ensure it points inward (toward centroid)
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      if ((cx - mx) * nx + (cy - my) * ny < 0) { nx = -nx; ny = -ny; }
+      // Offset the line inward by d pixels: c = dot(n, a) + d
+      lines.push({ nx, ny, c: nx * a.x + ny * a.y + d });
+    }
+
+    // Intersect consecutive offset lines to get inset vertices.
+    const result = [];
+    for (let i = 0; i < n; i++) {
+      const l1 = lines[i];
+      const l2 = lines[(i + 1) % n];
+      if (!l1 || !l2) {
+        result.push({ x: verts[(i + 1) % n].x, y: verts[(i + 1) % n].y });
+        continue;
+      }
+      const det = l1.nx * l2.ny - l2.nx * l1.ny;
+      if (Math.abs(det) < 1e-9) {
+        // Parallel edges — use the next vertex unchanged
+        result.push({ x: verts[(i + 1) % n].x, y: verts[(i + 1) % n].y });
+        continue;
+      }
+      result.push({
+        x: (l1.c * l2.ny - l2.c * l1.ny) / det / W,
+        y: (l1.nx * l2.c - l2.nx * l1.c) / det / H,
+      });
+    }
+    return result;
+  }
+
+  // Create or update the border-ring overlay that intercepts pointer events in the
+  // ~10px zone along each polygon edge so distorted windows can still be dragged.
+  // Inactive (pointer-events:none) for undistorted rectangular shapes.
+  _updateBorderRing() {
+    const v = this.activeVertices;
+
+    // Only needed when the shape is a distorted (non-rectangular) polygon.
+    if (!v || this._isRectangular(v)) {
+      if (this._borderRing) this._borderRing.style.pointerEvents = 'none';
+      return;
+    }
+
+    const W = this.size.width, H = this.size.height;
+    const d = 10; // border zone width in pixels
+
+    const inset = this._computeInsetPolygon(v, W, H, d);
+    if (!inset || inset.length < 3) {
+      if (this._borderRing) this._borderRing.style.pointerEvents = 'none';
+      return;
+    }
+
+    // Lazily create the ring div and its SVG clip-path element.
+    if (!this._borderRing) {
+      const ringEl = document.createElement('div');
+      ringEl.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:12;pointer-events:none;background:transparent;';
+      this.element.appendChild(ringEl);
+      this._borderRing = ringEl;
+    }
+
+    if (!this._borderRingSvg) {
+      const svgNS = 'http://www.w3.org/2000/svg';
+      const svgEl = document.createElementNS(svgNS, 'svg');
+      svgEl.setAttribute('style', 'position:absolute;width:0;height:0;overflow:visible;pointer-events:none;');
+      svgEl.setAttribute('aria-hidden', 'true');
+      const defs = document.createElementNS(svgNS, 'defs');
+      const clip = document.createElementNS(svgNS, 'clipPath');
+      clip.setAttribute('id', `brc-${this.id}`);
+      clip.setAttribute('clipPathUnits', 'userSpaceOnUse');
+      defs.appendChild(clip);
+      svgEl.appendChild(defs);
+      this.element.appendChild(svgEl);
+      this._borderRingSvg = svgEl;
+      this._borderRing.style.clipPath = `url(#brc-${this.id})`;
+    }
+
+    // Build the ring path: outer polygon + inner polygon (even-odd creates the hole).
+    const toPoints = pts => pts.map(p => `${(p.x * W).toFixed(2)} ${(p.y * H).toFixed(2)}`).join(' L ');
+    const pathD = `M ${toPoints(v)} Z M ${toPoints(inset)} Z`;
+
+    const ringClip = this._borderRingSvg.querySelector('clipPath');
+    ringClip.innerHTML = '';
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('clip-rule', 'evenodd');
+    path.setAttribute('d', pathD);
+    ringClip.appendChild(path);
+
+    this._borderRing.style.pointerEvents = 'auto';
   }
 
   // Convert normalized vertices to absolute workspace pixel positions
