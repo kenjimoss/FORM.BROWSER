@@ -82,6 +82,29 @@ let vertexDraggingTab = null;
 let tabIdCounter = 0;
 const undoStack = []; // entries: { type: 'merge', mergedTab } | { type: 'merge-add', mergedTab, tab } | { type: 'carve', snapshots }
 
+function parseStackZ(el) {
+  if (!el) return 0;
+  const z = parseInt(String(el.style.zIndex || '0'), 10);
+  return Number.isFinite(z) ? z : 0;
+}
+
+/** Largest inline z-index among a tab entry (single window or merged group + chrome). */
+function getEntryMaxStackZ(tab) {
+  if (tab.tabs && tab.borderSvg) {
+    let m = 0;
+    for (const t of tab.tabs) m = Math.max(m, parseStackZ(t.element));
+    m = Math.max(m, parseStackZ(tab.borderSvg), parseStackZ(tab.unmergeBtn));
+    return m;
+  }
+  return parseStackZ(tab.element);
+}
+
+function computeMaxStackZIndex() {
+  let maxZ = 0;
+  for (const tab of tabs) maxZ = Math.max(maxZ, getEntryMaxStackZ(tab));
+  return maxZ;
+}
+
 // Tab Window class
 class TabWindow {
   constructor(url = 'https://kenjimoss.github.io/portfolio/') {
@@ -170,6 +193,8 @@ class TabWindow {
     
     // Add initial shape class
     tabEl.classList.add(`shape-${this.shape}`);
+
+    tabEl.addEventListener('dragstart', (e) => e.preventDefault());
 
     const titleEl = tabEl.querySelector('.tab-title');
     if (titleEl) {
@@ -1148,24 +1173,21 @@ class TabWindow {
   }
 
   activate() {
-    // Deactivate all tabs
     tabs.forEach(tab => {
-      if (tab.element) {
+      if (tab.tabs && tab.borderSvg) {
+        tab.tabs.forEach(t => t.element.classList.remove('active'));
+      } else if (tab.element) {
         tab.element.classList.remove('active');
       }
     });
-    
-    // Activate this tab
+
     this.element.classList.add('active');
     activeTab = this;
-    
-    // Update URL input
     urlInput.value = this.url;
-    
-    // Bring to front
-    const maxZ = Math.max(0, ...tabs.map(t => parseInt(t.element?.style.zIndex || '0')));
-    this.element.style.zIndex = (maxZ + 1).toString();
-    
+
+    const z = computeMaxStackZIndex() + 1;
+    this.element.style.zIndex = String(z);
+
     console.log(`Activated tab ${this.id}: ${this.title}`);
   }
 
@@ -2698,14 +2720,11 @@ class PolygonMergedTab {
     activeTab = this;
     urlInput.value = this.tabs[this._focusedPaneIdx].url;
 
-    const maxZ = Math.max(0, ...tabs.map(t => {
-      const el = t.tabs ? t.tabs[0].element : t.element;
-      return parseInt(el?.style.zIndex || '0');
-    }));
-    const z = (maxZ + 1).toString();
-    this.tabs.forEach(t => t.element.style.zIndex = z);
-    this.borderSvg.style.zIndex  = (maxZ + 2).toString();
-    this.unmergeBtn.style.zIndex = (maxZ + 3).toString();
+    const maxZ = computeMaxStackZIndex();
+    const z = String(maxZ + 1);
+    this.tabs.forEach(t => { t.element.style.zIndex = z; });
+    this.borderSvg.style.zIndex  = String(maxZ + 2);
+    this.unmergeBtn.style.zIndex = String(maxZ + 3);
 
     // Keep button visible while active
     this._showBtn();
@@ -4859,13 +4878,13 @@ document.addEventListener('keydown', (e) => {
     const differenceEligible = s => rectLike(s) || s === 'circle' || s === 'triangle' || s === 'pentagon' || s === 'hexagon';
     const carveSnapshots = [];
     if (differenceEligible(activeTab.shape)) {
-      const activeZ = parseInt(activeTab.element?.style.zIndex || '0');
+      const activeZ = getEntryMaxStackZ(activeTab);
       for (const other of tabs) {
         if (other === activeTab || other.isMerged) continue;
         const circleOrTriangle = s => s === 'circle' || s === 'triangle';
         if (rectLike(activeTab.shape) && !rectLike(other.shape) && other.shape !== 'circle' && other.shape !== 'triangle' && other.shape !== 'pentagon' && other.shape !== 'hexagon') continue;
         if (activeTab.shape === 'circle'   && !rectLike(other.shape) && !circleOrTriangle(other.shape) && other.shape !== 'pentagon' && other.shape !== 'hexagon') continue;
-        const otherZ = parseInt(other.element?.style.zIndex || '0');
+        const otherZ = getEntryMaxStackZ(other);
         if (otherZ >= activeZ) continue;
         carveSnapshots.push(snapshotTabForCarve(other));
         applyBooleanDifference(other, activeTab);

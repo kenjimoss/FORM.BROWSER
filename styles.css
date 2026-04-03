@@ -188,18 +188,15 @@ body {
 .tab-window.active {
   border-color: #333;
   box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
-  z-index: 100;
 }
 
 .tab-window.dragging {
   opacity: 0.9;
   cursor: grabbing;
-  z-index: 200;
 }
 
 .tab-window.resizing {
   opacity: 0.95;
-  z-index: 200;
 }
 
 /* Shape variations */
