@@ -184,6 +184,9 @@ class TabWindow {
       // changeShape() runs before the webview is ready, so the initial _sendShapeUpdate
       // call is lost — this re-delivers it after the page is live.
       this.webview.addEventListener('did-finish-load', () => this._sendShapeUpdate());
+      this.webview.addEventListener('before-input-event', (e) => {
+        if (e.type === 'keyDown' && e.key === 'Delete') handleDeleteKey();
+      });
     }
 
     // Mousedown: vertex drag (shift+near vertex) > resize (near edge) > drag (border)
@@ -221,7 +224,7 @@ class TabWindow {
         }
         return;
       }
-      if (e.shiftKey && this.activeVertices) {
+      if (e.shiftKey && this.activeVertices && !this.isInBorderZone(e)) {
         const vertexIndex = this.getActiveVertexAtPoint(e);
         if (vertexIndex !== null) {
           e.stopPropagation();
@@ -791,6 +794,7 @@ class TabWindow {
       h.addEventListener('mousedown', (e) => {
         this.activate();
         if (!e.shiftKey || !this.activeVertices) return;
+        if (this.isInBorderZone(e)) return; // let border-zone Shift+drag bubble up for merge
         e.stopPropagation();
         this.startVertexDrag(e, i);
       });
@@ -4852,33 +4856,35 @@ function applyBooleanDifference(survivingTab, deletedTab) {
 }
 
 // Delete key closes active tab; if overlapping tabs behind it, carves its shape from them
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Delete' && activeTab) {
-    e.preventDefault();
-    const rectLike = s => s === 'rectangle' || s === 'rounded';
-    const differenceEligible = s => rectLike(s) || s === 'circle' || s === 'triangle' || s === 'pentagon' || s === 'hexagon';
-    const carveSnapshots = [];
-    if (differenceEligible(activeTab.shape)) {
-      const activeZ = parseInt(activeTab.element?.style.zIndex || '0');
-      for (const other of tabs) {
-        if (other === activeTab || other.isMerged) continue;
-        const circleOrTriangle = s => s === 'circle' || s === 'triangle';
-        if (rectLike(activeTab.shape) && !rectLike(other.shape) && other.shape !== 'circle' && other.shape !== 'triangle' && other.shape !== 'pentagon' && other.shape !== 'hexagon') continue;
-        if (activeTab.shape === 'circle'   && !rectLike(other.shape) && !circleOrTriangle(other.shape) && other.shape !== 'pentagon' && other.shape !== 'hexagon') continue;
-        // triangle carves all shapes — no restriction needed
-        // pentagon carves all shapes — no restriction needed
-        // hexagon carves all shapes — no restriction needed
-        const otherZ = parseInt(other.element?.style.zIndex || '0');
-        if (otherZ >= activeZ) continue; // only affect tabs behind the active one
-        carveSnapshots.push(snapshotTabForCarve(other));
-        applyBooleanDifference(other, activeTab);
-      }
+function handleDeleteKey() {
+  if (!activeTab) return;
+  const rectLike = s => s === 'rectangle' || s === 'rounded';
+  const differenceEligible = s => rectLike(s) || s === 'circle' || s === 'triangle' || s === 'pentagon' || s === 'hexagon';
+  const carveSnapshots = [];
+  if (differenceEligible(activeTab.shape)) {
+    const activeZ = parseInt(activeTab.element?.style.zIndex || '0');
+    for (const other of tabs) {
+      if (other === activeTab || other.isMerged) continue;
+      const circleOrTriangle = s => s === 'circle' || s === 'triangle';
+      if (rectLike(activeTab.shape) && !rectLike(other.shape) && other.shape !== 'circle' && other.shape !== 'triangle' && other.shape !== 'pentagon' && other.shape !== 'hexagon') continue;
+      if (activeTab.shape === 'circle'   && !rectLike(other.shape) && !circleOrTriangle(other.shape) && other.shape !== 'pentagon' && other.shape !== 'hexagon') continue;
+      // triangle carves all shapes — no restriction needed
+      // pentagon carves all shapes — no restriction needed
+      // hexagon carves all shapes — no restriction needed
+      const otherZ = parseInt(other.element?.style.zIndex || '0');
+      if (otherZ >= activeZ) continue; // only affect tabs behind the active one
+      carveSnapshots.push(snapshotTabForCarve(other));
+      applyBooleanDifference(other, activeTab);
     }
-    if (carveSnapshots.length > 0) {
-      undoStack.push({ type: 'carve', snapshots: carveSnapshots });
-    }
-    activeTab.close();
   }
+  if (carveSnapshots.length > 0) {
+    undoStack.push({ type: 'carve', snapshots: carveSnapshots });
+  }
+  activeTab.close();
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Delete') { e.preventDefault(); handleDeleteKey(); }
 });
 
 // Ctrl+Z — undo last merge or carve
