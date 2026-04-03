@@ -603,11 +603,14 @@ class TabWindow {
     this.updateVertexHandles();
 
     if (this.webview) {
+      const rect = this.webview.getBoundingClientRect();
       const payload = JSON.stringify({
         shape: this.shape,
         vertices: this.activeVertices,
         width: this.size.width,
-        height: this.size.height
+        height: this.size.height,
+        screenX: Math.round(window.screenX + rect.left),
+        screenY: Math.round(window.screenY + rect.top)
       });
       this.webview.executeJavaScript(
         `window.__shapeUpdate && window.__shapeUpdate(${payload})`
