@@ -498,7 +498,7 @@ class TabWindow {
   updateShapeClipPath() {
     const v = this.activeVertices;
     // Holes take priority: delegate to the SVG clip-path + evenodd renderer.
-    if (this.holes.length > 0) { this._updateClipPathWithHoles(v); return; }
+    if (this.holes.length > 0) { this._updateClipPathWithHoles(v); this._sendShapeUpdate(); return; }
     if (!v) return;
 
     // Vertex coords (0-1) are relative to the element's border-box.
@@ -732,18 +732,21 @@ class TabWindow {
 
     this.updateShapeClipPath();
     this.updateVertexHandles();
+    this._sendShapeUpdate();
+  }
 
-    if (this.webview) {
-      const payload = JSON.stringify({
-        shape: this.shape,
-        vertices: this.activeVertices,
-        width: this.size.width,
-        height: this.size.height
-      });
-      this.webview.executeJavaScript(
-        `window.__shapeUpdate && window.__shapeUpdate(${payload})`
-      );
-    }
+  _sendShapeUpdate() {
+    if (!this.webview) return;
+    const payload = JSON.stringify({
+      shape: this.shape,
+      vertices: this.activeVertices,
+      holes: this.holes.length > 0 ? this.holes : null,
+      width: this.size.width,
+      height: this.size.height,
+    });
+    this.webview.executeJavaScript(
+      `window.__shapeUpdate && window.__shapeUpdate(${payload})`
+    );
   }
 
   // Create transparent hit-target divs positioned at each vertex of the current shape.
