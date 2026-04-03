@@ -741,9 +741,20 @@ class TabWindow {
 
   _sendShapeUpdate() {
     if (!this.webview) return;
+    // For an undistorted CSS circle, activeVertices is null. Generate a 64-gon
+    // ellipse approximation in normalized (0-1) coords so the portfolio knows
+    // to clip the grid to the circular shape.
+    let vertices = this.activeVertices;
+    if (!vertices && this.shape === 'circle') {
+      const N = 64;
+      vertices = Array.from({ length: N }, (_, i) => {
+        const a = 2 * Math.PI * i / N;
+        return { x: 0.5 + 0.5 * Math.cos(a), y: 0.5 + 0.5 * Math.sin(a) };
+      });
+    }
     const payload = JSON.stringify({
       shape: this.shape,
-      vertices: this.activeVertices,
+      vertices,
       holes: this.holes.length > 0 ? this.holes : null,
       width: this.size.width,
       height: this.size.height,
