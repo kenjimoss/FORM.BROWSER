@@ -180,6 +180,10 @@ class TabWindow {
     this.webview = tabEl.querySelector('.tab-webview');
     if (this.webview) {
       this.webview.src = this.url;
+      // Send current shape to the portfolio once the page finishes loading.
+      // changeShape() runs before the webview is ready, so the initial _sendShapeUpdate
+      // call is lost — this re-delivers it after the page is live.
+      this.webview.addEventListener('did-finish-load', () => this._sendShapeUpdate());
     }
 
     // Mousedown: vertex drag (shift+near vertex) > resize (near edge) > drag (border)
@@ -1299,6 +1303,7 @@ class TabWindow {
       }
     }
 
+    this._sendShapeUpdate();
     console.log(`Changed tab ${this.id} shape to ${newShape}`);
   }
 
@@ -1557,10 +1562,28 @@ function strictlyInConvexPolygon(p, poly) {
 }
 
 // ---------------------------------------------------------------------------
-// polygonUnionOutline — generalized boundary-tracing union for any two convex
-// polygons (works for triangles, pentagons, hexagons, etc.).
+// pointInPolygon — ray-casting point-in-polygon test.
+// Works for any simple polygon (convex or non-convex).
+// ---------------------------------------------------------------------------
+function pointInPolygon(p, poly) {
+  const n = poly.length;
+  let inside = false;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y;
+    const xj = poly[j].x, yj = poly[j].y;
+    if (((yi > p.y) !== (yj > p.y)) &&
+        (p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi)) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// ---------------------------------------------------------------------------
+// polygonUnionOutline — generalized boundary-tracing union for any two simple
+// polygons (convex or non-convex: works for distorted quads, triangles, etc.).
 // Same algorithm as triangleUnionPolygon but the edge loops use poly.length
-// instead of the hard-coded 3.
+// instead of the hard-coded 3, and uses ray-casting for inside/outside tests.
 // ---------------------------------------------------------------------------
 function polygonUnionOutline(polyA, polyB) {
   const nA = polyA.length, nB = polyB.length;
@@ -1592,7 +1615,7 @@ function polygonUnionOutline(polyA, polyB) {
 
   // No crossings: containment or no overlap.
   if (isects.length === 0) {
-    if (polyA.some(p => strictlyInConvexPolygon(p, polyB))) return [...polyB];
+    if (polyA.some(p => pointInPolygon(p, polyB))) return [...polyB];
     return [...polyA];
   }
 
@@ -1614,7 +1637,7 @@ function polygonUnionOutline(polyA, polyB) {
   const seqA = buildSeq(polyA, isects, 'edgeA', 'tA');
   const seqB = buildSeq(polyB, isects, 'edgeB', 'tB');
 
-  const startA = seqA.findIndex(n => !n.isIsect && !strictlyInConvexPolygon(n.pt, polyB));
+  const startA = seqA.findIndex(n => !n.isIsect && !pointInPolygon(n.pt, polyB));
   if (startA === -1) return [...polyB];
 
   const result = [];
@@ -1649,8 +1672,8 @@ function polygonUnionOutline(polyA, polyB) {
 
   // Fallback: convex hull of outer vertices + crossings.
   const pts = [
-    ...polyA.filter(p => !strictlyInConvexPolygon(p, polyB)),
-    ...polyB.filter(p => !strictlyInConvexPolygon(p, polyA)),
+    ...polyA.filter(p => !pointInPolygon(p, polyB)),
+    ...polyB.filter(p => !pointInPolygon(p, polyA)),
     ...isects.map(x => x.pt),
   ];
   const dd = [];
