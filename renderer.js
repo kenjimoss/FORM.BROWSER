@@ -80,6 +80,7 @@ let resizingTab = null;
 let resizeData = { direction: null, startX: 0, startY: 0, startWidth: 0, startHeight: 0, startLeft: 0, startTop: 0 };
 let vertexDraggingTab = null;
 let tabIdCounter = 0;
+let _zTop = 0; // monotonically increasing; each activate() call gets the next value
 const undoStack = []; // entries: { type: 'merge', mergedTab } | { type: 'merge-add', mergedTab, tab } | { type: 'carve', snapshots }
 
 function parseStackZ(el) {
@@ -88,7 +89,8 @@ function parseStackZ(el) {
   return Number.isFinite(z) ? z : 0;
 }
 
-/** Largest inline z-index among a tab entry (single window or merged group + chrome). */
+/** Largest inline z-index among a tab entry (single window or merged group + chrome).
+ *  Used by boolean-difference logic to determine which tab is "on top". */
 function getEntryMaxStackZ(tab) {
   if (tab.tabs && tab.borderSvg) {
     let m = 0;
@@ -97,12 +99,6 @@ function getEntryMaxStackZ(tab) {
     return m;
   }
   return parseStackZ(tab.element);
-}
-
-function computeMaxStackZIndex() {
-  let maxZ = 0;
-  for (const tab of tabs) maxZ = Math.max(maxZ, getEntryMaxStackZ(tab));
-  return maxZ;
 }
 
 // Tab Window class
@@ -310,6 +306,10 @@ class TabWindow {
         this._edgePreviewData = null;
       }
     });
+
+    // Give the element a z-index immediately so it doesn't flash behind existing
+    // tabs for the one frame before activate() is called.
+    tabEl.style.zIndex = String(_zTop + 1);
 
     // Append to workspace
     workspace.appendChild(tabEl);
@@ -1185,8 +1185,7 @@ class TabWindow {
     activeTab = this;
     urlInput.value = this.url;
 
-    const z = computeMaxStackZIndex() + 1;
-    this.element.style.zIndex = String(z);
+    this.element.style.zIndex = String(++_zTop);
 
     console.log(`Activated tab ${this.id}: ${this.title}`);
   }
@@ -2720,11 +2719,10 @@ class PolygonMergedTab {
     activeTab = this;
     urlInput.value = this.tabs[this._focusedPaneIdx].url;
 
-    const maxZ = computeMaxStackZIndex();
-    const z = String(maxZ + 1);
-    this.tabs.forEach(t => { t.element.style.zIndex = z; });
-    this.borderSvg.style.zIndex  = String(maxZ + 2);
-    this.unmergeBtn.style.zIndex = String(maxZ + 3);
+    const paneZ = String(++_zTop);
+    this.tabs.forEach(t => { t.element.style.zIndex = paneZ; });
+    this.borderSvg.style.zIndex  = String(++_zTop);
+    this.unmergeBtn.style.zIndex = String(++_zTop);
 
     // Keep button visible while active
     this._showBtn();
