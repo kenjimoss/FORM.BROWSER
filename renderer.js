@@ -3796,6 +3796,17 @@ function _addMergeHighlight(candidate) {
     candidate.borderSvg.style.filter = 'drop-shadow(0 0 12px rgba(0, 120, 212, 0.7))';
   } else {
     candidate.element.classList.add('merge-candidate');
+    // Directly set inline filter so the blue glow works regardless of whether
+    // the shape already has an inline filter (rectangle/rounded set one in changeShape,
+    // which a stylesheet !important rule may not reliably override in Electron).
+    candidate._savedMergeFilter = candidate.element.style.filter;
+    candidate.element.style.filter = 'drop-shadow(0 0 12px rgba(0, 120, 212, 0.7))';
+    // Also turn the ::after border blue via the injected style tag (if present).
+    const styleEl = document.getElementById(`tab-style-${candidate.id}`);
+    if (styleEl) {
+      const sel = `.tab-window.shape-${candidate.shape}[data-tab-id="${candidate.id}"]`;
+      styleEl.textContent += `\n${sel}.merge-candidate::after { background: #0078d4; }`;
+    }
   }
 }
 
@@ -3805,6 +3816,11 @@ function _removeMergeHighlight(candidate) {
     candidate.borderSvg.style.filter = '';
   } else {
     candidate.element.classList.remove('merge-candidate');
+    // Restore the filter that was in place before highlighting.
+    candidate.element.style.filter = candidate._savedMergeFilter ?? '';
+    candidate._savedMergeFilter = undefined;
+    // Rebuild the injected style tag without the merge-candidate rule.
+    candidate.updateShapeClipPath();
   }
 }
 
@@ -3923,7 +3939,9 @@ function applyBooleanDifference(survivingTab, deletedTab) {
     const sA = { x: survivingTab.position.x, y: survivingTab.position.y,
                  w: survivingTab.size.width,  h: survivingTab.size.height };
 
-    if (rectLike(deletedTab.shape)) {
+    if (rectLike(deletedTab.shape) &&
+        survivingTab._isRectangular(survivingTab.activeVertices) &&
+        deletedTab._isRectangular(deletedTab.activeVertices)) {
       const sB = { x: deletedTab.position.x, y: deletedTab.position.y,
                    w: deletedTab.size.width,  h: deletedTab.size.height };
       if (sB.x >= sA.x && sB.y >= sA.y &&
@@ -4419,14 +4437,27 @@ function applyBooleanDifference(survivingTab, deletedTab) {
   }
 
   if (rectLike(survivingTab.shape) && rectLike(deletedTab.shape)) {
-    const rA = { x: survivingTab.position.x, y: survivingTab.position.y,
-                 w: survivingTab.size.width,  h: survivingTab.size.height };
-    const rB = { x: deletedTab.position.x,   y: deletedTab.position.y,
-                 w: deletedTab.size.width,    h: deletedTab.size.height };
+    const survivingDistorted = !survivingTab._isRectangular(survivingTab.activeVertices);
+    const deletedDistorted   = !deletedTab._isRectangular(deletedTab.activeVertices);
 
-    const diffPoly = computeRectDifference(rA, rB);
-    console.log('[CARVE] rect+rect — rA:', JSON.stringify(rA), 'rB:', JSON.stringify(rB));
-    console.log('[CARVE] rect+rect — diffPoly:', diffPoly ? JSON.stringify(diffPoly) : 'null (no change)');
+    let diffPoly;
+    if (survivingDistorted || deletedDistorted) {
+      // At least one shape has been freely distorted — use actual vertex geometry.
+      const toAbs = tab => tab.activeVertices.map(v => ({
+        x: tab.position.x + v.x * tab.size.width,
+        y: tab.position.y + v.y * tab.size.height,
+      }));
+      diffPoly = computePolygonDifference(toAbs(survivingTab), toAbs(deletedTab));
+    } else {
+      // Both shapes are axis-aligned rectangles — use the fast rect path.
+      const rA = { x: survivingTab.position.x, y: survivingTab.position.y,
+                   w: survivingTab.size.width,  h: survivingTab.size.height };
+      const rB = { x: deletedTab.position.x,   y: deletedTab.position.y,
+                   w: deletedTab.size.width,    h: deletedTab.size.height };
+      diffPoly = computeRectDifference(rA, rB);
+      console.log('[CARVE] rect+rect — rA:', JSON.stringify(rA), 'rB:', JSON.stringify(rB));
+      console.log('[CARVE] rect+rect — diffPoly:', diffPoly ? JSON.stringify(diffPoly) : 'null (no change)');
+    }
     if (!diffPoly) return;
 
     // Vertex count changes (4 → 6 or 8), so rebuild handles from scratch.
