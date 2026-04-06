@@ -82,6 +82,7 @@ let vertexDraggingTab = null;
 let tabIdCounter = 0;
 let _zTop = 0; // monotonically increasing; each activate() call gets the next value
 const undoStack = []; // entries: { type: 'merge', mergedTab } | { type: 'merge-add', mergedTab, tab } | { type: 'carve', snapshots }
+const PORTFOLIO_URL = 'https://kenjimoss.github.io/portfolio/';
 
 function parseStackZ(el) {
   if (!el) return 0;
@@ -2348,6 +2349,7 @@ class PolygonMergedTab {
 
     this.applyMergeStyle();
     this.createOverlay();
+    this._createMergedWebview();
     tabs.push(this);
   }
 
@@ -2369,6 +2371,79 @@ class PolygonMergedTab {
   get origRectB() { return this.origRects[1]; }
   get paneAOff()  { return this.paneOffsets[0]; }
   get paneBOff()  { return this.paneOffsets[1]; }
+
+  // True when every member tab is showing the portfolio page.
+  // Used to gate the unified-webview rendering path.
+  get _isPortfolioMerge() {
+    return this.tabs.every(t => t.url && t.url.startsWith(PORTFOLIO_URL));
+  }
+
+  // Returns the union polygon in the form __shapeUpdate expects, plus a CSS
+  // clip-path string for the unified webview element.  Pure computation — no
+  // side effects.  Called from _createMergedWebview (Step 3) and
+  // _rebuildForVertexDrag (Step 5).
+  _computeUnionShape() {
+    const ox = this.position.x, oy = this.position.y;
+    const w  = this.size.width,  h  = this.size.height;
+
+    const polys = this.tabs.map(t => tabToPolygon(t, ox, oy));
+    let unionPoly = polys[0];
+    for (let i = 1; i < polys.length; i++)
+      unionPoly = polygonUnionOutline(unionPoly, polys[i]);
+
+    const vertices = unionPoly.map(pt => ({ x: pt.x / w, y: pt.y / h }));
+    const clipPath  = 'polygon(' +
+      vertices.map(v => `${(v.x * 100).toFixed(3)}% ${(v.y * 100).toFixed(3)}%`).join(', ') +
+    ')';
+
+    return { vertices, width: w, height: h, clipPath };
+  }
+
+  // ── Unified webview for portfolio merges ───────────────────────────────────
+  _createMergedWebview() {
+    if (!this._isPortfolioMerge) return;
+
+    const { x, y } = this.position;
+    const { width: w, height: h } = this.size;
+    const { clipPath } = this._computeUnionShape();
+
+    const wv = document.createElement('webview');
+    wv.setAttribute('src', PORTFOLIO_URL);
+    wv.style.cssText = [
+      'position:absolute',
+      `left:${x}px`, `top:${y}px`,
+      `width:${w}px`, `height:${h}px`,
+      `clip-path:${clipPath}`,
+    ].join(';');
+
+    this._mergedWebview = wv;
+    this._mergedWebviewReady = false;
+
+    wv.addEventListener('did-finish-load', () => {
+      this._mergedWebviewReady = true;
+      this._sendMergedShapeUpdate();
+    });
+
+    const onNav = (e) => {
+      this.url = e.url;
+      if (activeTab === this) urlInput.value = e.url;
+    };
+    wv.addEventListener('did-navigate',         onNav);
+    wv.addEventListener('did-navigate-in-page', onNav);
+    this._mergedWebviewNavListener = onNav;
+
+    this.tabs.forEach(t => { t.element.style.visibility = 'hidden'; });
+    workspace.appendChild(wv);
+  }
+
+  _sendMergedShapeUpdate() {
+    if (!this._mergedWebview || !this._mergedWebviewReady) return;
+    const { vertices, width, height } = this._computeUnionShape();
+    const payload = JSON.stringify({ shape: 'polygon', vertices, holes: null, width, height });
+    this._mergedWebview.executeJavaScript(
+      `window.__shapeUpdate && window.__shapeUpdate(${payload})`
+    );
+  }
 
   // ── Apply merge CSS to the two existing tab elements in-place ─────────────
   applyMergeStyle() {
@@ -2543,6 +2618,7 @@ class PolygonMergedTab {
       el.style.filter        = '';
       el.style.transform     = '';
       el.style.transition    = '';
+      el.style.visibility    = '';
       el.style.pointerEvents = '';
       t.webview.style.pointerEvents = '';
     }
@@ -2712,6 +2788,11 @@ class PolygonMergedTab {
     this.unmergeBtn.style.left = (px + this.size.width / 2) + 'px';
     this.unmergeBtn.style.top  = (py + 4) + 'px';
     this._repositionMergedVertexHandles();
+
+    if (this._mergedWebview) {
+      this._mergedWebview.style.left = px + 'px';
+      this._mergedWebview.style.top  = py + 'px';
+    }
   }
 
   activate() {
@@ -2722,10 +2803,11 @@ class PolygonMergedTab {
     });
     this.tabs.forEach(t => t.element.classList.add('active'));
     activeTab = this;
-    urlInput.value = this.tabs[this._focusedPaneIdx].url;
+    urlInput.value = this._mergedWebview ? this.url : this.tabs[this._focusedPaneIdx].url;
 
     const paneZ = String(++_zTop);
     this.tabs.forEach(t => { t.element.style.zIndex = paneZ; });
+    if (this._mergedWebview) this._mergedWebview.style.zIndex = String(++_zTop);
     this.borderSvg.style.zIndex  = String(++_zTop);
     this.unmergeBtn.style.zIndex = String(++_zTop);
 
@@ -2759,6 +2841,14 @@ class PolygonMergedTab {
     this.removeMergedVertexHandles();
     this.borderSvg.remove();
     this.unmergeBtn.remove();
+    if (this._mergedWebview) {
+      if (this._mergedWebviewNavListener) {
+        this._mergedWebview.removeEventListener('did-navigate',         this._mergedWebviewNavListener);
+        this._mergedWebview.removeEventListener('did-navigate-in-page', this._mergedWebviewNavListener);
+      }
+      this._mergedWebview.remove();
+      this._mergedWebview = null;
+    }
     if (this === activeTab) {
       if (tabs.length > 0) tabs[tabs.length - 1].activate();
       else { activeTab = null; urlInput.value = ''; }
@@ -2778,6 +2868,14 @@ class PolygonMergedTab {
     this.removeMergedVertexHandles();
     this.borderSvg.remove();
     this.unmergeBtn.remove();
+    if (this._mergedWebview) {
+      if (this._mergedWebviewNavListener) {
+        this._mergedWebview.removeEventListener('did-navigate',         this._mergedWebviewNavListener);
+        this._mergedWebview.removeEventListener('did-navigate-in-page', this._mergedWebviewNavListener);
+      }
+      this._mergedWebview.remove();
+      this._mergedWebview = null;
+    }
 
     // Restore CSS so each tab looks like an independent window again
     this.restoreMergeStyle();
@@ -3124,6 +3222,16 @@ class PolygonMergedTab {
     this.unmergeBtn.style.top  = (newOy + 4) + 'px';
 
     this._applySeamClips();
+
+    if (this._mergedWebview) {
+      const { clipPath } = this._computeUnionShape();
+      this._mergedWebview.style.left     = newOx + 'px';
+      this._mergedWebview.style.top      = newOy + 'px';
+      this._mergedWebview.style.width    = w + 'px';
+      this._mergedWebview.style.height   = h + 'px';
+      this._mergedWebview.style.clipPath = clipPath;
+      this._sendMergedShapeUpdate();
+    }
   }
 
   startMergedVertexDrag(e, handleIdx) {
@@ -3162,10 +3270,14 @@ class PolygonMergedTab {
   changeShape()  { console.log('Cannot change shape of a polygon merged tab'); }
   updateTitle()  { /* no-op */ }
   updateUrl(url) {
-    const t = this.tabs[this._focusedPaneIdx];
-    t.url = url;
-    if (t.webview) t.webview.src = url;
     this.url = url;
+    if (this._mergedWebview) {
+      this._mergedWebview.src = url;
+    } else {
+      const t = this.tabs[this._focusedPaneIdx];
+      t.url = url;
+      if (t.webview) t.webview.src = url;
+    }
   }
 }
 
@@ -4957,6 +5069,16 @@ document.addEventListener('keydown', (e) => {
       entry.mergedTab.removeTab(entry.tab);
     } else {
       for (const snap of entry.snapshots) restoreCarveSnapshot(snap);
+    }
+  }
+});
+
+// Ctrl+U — unmerge the active merged tab
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'u') {
+    if (activeTab && activeTab.isMerged) {
+      e.preventDefault();
+      activeTab.unmerge();
     }
   }
 });

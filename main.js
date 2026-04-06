@@ -57,6 +57,7 @@ ipcMain.on('window-maximize', () => mainWindow.isMaximized() ? mainWindow.unmaxi
 ipcMain.on('window-close', () => mainWindow.close());
 ipcMain.handle('window-resize', (event, { x, y, width, height }) => mainWindow.setBounds({ x, y, width, height }));
 
+app.commandLine.appendSwitch('disable-http-cache');
 app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {
