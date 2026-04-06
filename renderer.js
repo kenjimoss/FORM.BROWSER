@@ -129,8 +129,8 @@ class TabWindow {
     this._borderRing         = null; // ring-shaped overlay covering only the polygon border zone
     this._borderRingSvg      = null; // <svg><defs><clipPath> element for the border ring
     this.createElement();
-    this.changeShape(this.shape);
     tabs.push(this);
+    this.changeShape(this.shape);
   }
 
   // Returns the active vertex array for the current shape, or null for non-vertex shapes.
@@ -204,7 +204,10 @@ class TabWindow {
       // Send current shape to the portfolio once the page finishes loading.
       // changeShape() runs before the webview is ready, so the initial _sendShapeUpdate
       // call is lost — this re-delivers it after the page is live.
-      this.webview.addEventListener('did-finish-load', () => this._sendShapeUpdate());
+      this.webview.addEventListener('did-finish-load', () => {
+        this._webviewReady = true;
+        this._sendShapeUpdate();
+      });
     }
 
     // Mousedown: vertex drag (shift+near vertex) > resize (near edge) > drag (border)
@@ -713,6 +716,7 @@ class TabWindow {
   // Given absolute workspace positions for all vertices, resize/reposition the
   // element so all vertices fit inside it, then recompute normalized coords.
   applyVertexLayout(absVertices) {
+    console.log('[LAYOUT] applyVertexLayout — tab', this.id, 'shape:', this.shape, 'vertices:', absVertices.length);
     // Capture old bbox before any update so we can renormalize holes below.
     const oldX = this.position.x, oldY = this.position.y;
     const oldW = this.size.width,  oldH = this.size.height;
@@ -766,6 +770,7 @@ class TabWindow {
 
   _sendShapeUpdate() {
     if (!this.webview) return;
+    if (!this._webviewReady) return;
     // For an undistorted CSS circle, activeVertices is null. Generate a 64-gon
     // ellipse approximation in normalized (0-1) coords so the portfolio knows
     // to clip the grid to the circular shape.
@@ -3906,6 +3911,10 @@ function restoreCarveSnapshot(snap) {
 // ---------------------------------------------------------------------------
 function applyBooleanDifference(survivingTab, deletedTab) {
   const rectLike = s => s === 'rectangle' || s === 'rounded';
+  console.log('[CARVE] applyBooleanDifference — surviving:', survivingTab.id, survivingTab.shape,
+    'pos:', JSON.stringify(survivingTab.position), 'size:', JSON.stringify(survivingTab.size));
+  console.log('[CARVE] applyBooleanDifference — deleted:', deletedTab.id, deletedTab.shape,
+    'pos:', JSON.stringify(deletedTab.position), 'size:', JSON.stringify(deletedTab.size));
 
   // ── Containment: cutter fully inside surviving → punch a hole ──────────────
   // Supported targets: rect/rounded, circle, triangle, pentagon, hexagon.
@@ -4416,6 +4425,8 @@ function applyBooleanDifference(survivingTab, deletedTab) {
                  w: deletedTab.size.width,    h: deletedTab.size.height };
 
     const diffPoly = computeRectDifference(rA, rB);
+    console.log('[CARVE] rect+rect — rA:', JSON.stringify(rA), 'rB:', JSON.stringify(rB));
+    console.log('[CARVE] rect+rect — diffPoly:', diffPoly ? JSON.stringify(diffPoly) : 'null (no change)');
     if (!diffPoly) return;
 
     // Vertex count changes (4 → 6 or 8), so rebuild handles from scratch.
@@ -4875,18 +4886,25 @@ document.addEventListener('keydown', (e) => {
     const rectLike = s => s === 'rectangle' || s === 'rounded';
     const differenceEligible = s => rectLike(s) || s === 'circle' || s === 'triangle' || s === 'pentagon' || s === 'hexagon';
     const carveSnapshots = [];
+    console.log('[DELETE] fired. activeTab:', activeTab.id, 'shape:', activeTab.shape);
+    console.log('[DELETE] all tabs:', tabs.map(t => ({ id: t.id, shape: t.shape, z: t.element?.style.zIndex, isMerged: t.isMerged })));
     if (differenceEligible(activeTab.shape)) {
       const activeZ = getEntryMaxStackZ(activeTab);
+      console.log('[DELETE] activeZ:', activeZ);
       for (const other of tabs) {
         if (other === activeTab || other.isMerged) continue;
         const circleOrTriangle = s => s === 'circle' || s === 'triangle';
         if (rectLike(activeTab.shape) && !rectLike(other.shape) && other.shape !== 'circle' && other.shape !== 'triangle' && other.shape !== 'pentagon' && other.shape !== 'hexagon') continue;
         if (activeTab.shape === 'circle'   && !rectLike(other.shape) && !circleOrTriangle(other.shape) && other.shape !== 'pentagon' && other.shape !== 'hexagon') continue;
         const otherZ = getEntryMaxStackZ(other);
+        console.log('[DELETE] candidate tab:', other.id, 'otherZ:', otherZ, '— skipping?', otherZ >= activeZ);
         if (otherZ >= activeZ) continue;
+        console.log('[DELETE] → calling applyBooleanDifference on tab', other.id);
         carveSnapshots.push(snapshotTabForCarve(other));
         applyBooleanDifference(other, activeTab);
       }
+    } else {
+      console.log('[DELETE] activeTab shape not differenceEligible:', activeTab.shape);
     }
     if (carveSnapshots.length > 0) {
       undoStack.push({ type: 'carve', snapshots: carveSnapshots });
