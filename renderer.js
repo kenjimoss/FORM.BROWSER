@@ -2370,18 +2370,72 @@ class PolygonMergedTab {
   get paneAOff()  { return this.paneOffsets[0]; }
   get paneBOff()  { return this.paneOffsets[1]; }
 
-  // ── Hide original pane elements — merged webview renders in their place ─────
+  // ── Apply merge CSS to the two existing tab elements in-place ─────────────
   applyMergeStyle() {
-    // Hide original pane elements. They stay in the DOM so unmerge can restore
-    // them without triggering a webview reload.
-    this.tabs.forEach(t => { t.element.style.display = 'none'; });
+    // Suppress ::after SVG borders for any pane that has them (triangle, pentagon,
+    // hexagon, distorted shapes).  Undistorted rects have no tab-style element so
+    // suppressAfter is a safe no-op for them.
+    const suppressAfter = (tab) => {
+      const styleEl = document.getElementById(`tab-style-${tab.id}`);
+      if (!styleEl) return null;
+      const saved = styleEl.textContent;
+      const sel = `.tab-window.shape-${tab.shape}[data-tab-id="${tab.id}"]`;
+      styleEl.textContent = `${sel}::after { display:none; }\n${sel}.active::after { display:none; }`;
+      return saved;
+    };
+    this._savedStyles = this.tabs.map(t => suppressAfter(t));
 
-    // Redirect per-pane activate() calls to this merged tab so that any
-    // lingering event handlers on hidden elements don't corrupt activeTab.
+    this._applySeamClips();
+
+    // Suppress individual borders / shadows — the border SVG overlay takes over.
+    // Set pointer-events:none on each pane so the border stroke becomes the
+    // only interactive surface for the merged group.
+    for (const t of this.tabs) {
+      const el = t.element;
+      el.style.border        = 'none';
+      el.style.boxShadow     = 'none';
+      // Circles rely on border-radius: 50% from their CSS class for the outer
+      // arc shape; zeroing it here would make them render as rectangles so the
+      // seam-clip polygon would clip a rectangle instead of an ellipse.
+      if (t.shape !== 'circle') el.style.borderRadius = '0';
+      el.style.filter        = 'none';
+      el.style.transform     = 'none';
+      el.style.transition    = 'none';
+      el.style.pointerEvents = 'none';
+      // Webviews stay interactive so the user can browse inside each pane.
+      t.webview.style.pointerEvents = 'auto';
+    }
+
+    // When a webview click bubbles up to a pane element, TabWindow's own mousedown
+    // handler calls tab.activate(), which would set activeTab to a tab no longer in
+    // tabs[].  Redirect those calls to this merged tab's activate() instead so state
+    // stays consistent, and record which pane index was clicked.
     this._origActivates = this.tabs.map((t, i) => {
       const orig = t.activate.bind(t);
       t.activate = () => { this._focusedPaneIdx = i; this.activate(); };
       return orig;
+    });
+
+    // When the user clicks directly inside a webview, focus fires on the webview
+    // element — use that to track the focused pane and update the URL bar.
+    this._onFocus = this.tabs.map((t, i) => {
+      const fn = () => {
+        this._focusedPaneIdx = i;
+        if (activeTab === this) urlInput.value = t.url;
+      };
+      t.webview.addEventListener('focus', fn);
+      return fn;
+    });
+
+    // Track URL changes as the user browses within each pane.
+    this._onNavigate = this.tabs.map((t, i) => {
+      const fn = (e) => {
+        t.url = e.url;
+        if (activeTab === this && this._focusedPaneIdx === i) urlInput.value = e.url;
+      };
+      t.webview.addEventListener('did-navigate',         fn);
+      t.webview.addEventListener('did-navigate-in-page', fn);
+      return fn;
     });
   }
 
@@ -2477,11 +2531,39 @@ class PolygonMergedTab {
     }
   }
 
-  // ── Restore original pane elements when unmerging ────────────────────────
+  // ── Restore original CSS when unmerging / closing ─────────────────────────
   restoreMergeStyle() {
-    // Show original pane elements and restore their shapes.
-    this.tabs.forEach(t => {
-      t.element.style.display = '';
+    for (const t of this.tabs) {
+      // _applySeamClips always writes a clip-path, so always clear it on restore.
+      const el = t.element;
+      el.style.clipPath      = '';
+      el.style.border        = '';
+      el.style.boxShadow     = '';
+      el.style.borderRadius  = '';
+      el.style.filter        = '';
+      el.style.transform     = '';
+      el.style.transition    = '';
+      el.style.pointerEvents = '';
+      t.webview.style.pointerEvents = '';
+    }
+
+    // Remove per-pane focus and navigation listeners added during merge.
+    (this._onFocus || []).forEach((fn, i) => {
+      if (fn) this.tabs[i].webview.removeEventListener('focus', fn);
+    });
+    (this._onNavigate || []).forEach((fn, i) => {
+      if (fn) {
+        this.tabs[i].webview.removeEventListener('did-navigate',         fn);
+        this.tabs[i].webview.removeEventListener('did-navigate-in-page', fn);
+      }
+    });
+
+    // Restore any ::after SVG borders that were suppressed during merge.
+    // _savedStyles[i] is null for panes that had nothing to suppress (undistorted rects).
+    this.tabs.forEach((t, i) => {
+      const styleEl = document.getElementById(`tab-style-${t.id}`);
+      if (styleEl && this._savedStyles && this._savedStyles[i])
+        styleEl.textContent = this._savedStyles[i];
       t.updateShapeClipPath();
     });
 
@@ -2553,27 +2635,6 @@ class PolygonMergedTab {
     this._showBtn = showBtn;
     this._hideBtn = hideBtn;
 
-    // Single merged webview — fills the union bounding box, clipped to the union polygon.
-    const clipPct = unionPoly.map(p => `${(p.x / w * 100).toFixed(3)}% ${(p.y / h * 100).toFixed(3)}%`).join(', ');
-    const container = document.createElement('div');
-    container.style.cssText = `position:absolute; left:${x}px; top:${y}px; width:${w}px; height:${h}px; overflow:hidden; clip-path:polygon(${clipPct});`;
-    const wv = document.createElement('webview');
-    wv.src = this.url;
-    wv.style.cssText = 'width:100%; height:100%; border:none;';
-    wv.setAttribute('nodeintegration', '');
-    container.appendChild(wv);
-    workspace.insertBefore(container, this.borderSvg);
-    this.mergedContainer = container;
-    this.mergedWebview   = wv;
-
-    // Send shape to portfolio once the page loads, and track URL bar.
-    wv.addEventListener('did-finish-load', () => {
-      this._webviewReady = true;
-      this._sendMergedShapeUpdate();
-    });
-    wv.addEventListener('did-navigate',         (e) => { this.url = e.url; if (activeTab === this) urlInput.value = e.url; });
-    wv.addEventListener('did-navigate-in-page', (e) => { this.url = e.url; if (activeTab === this) urlInput.value = e.url; });
-
     workspace.appendChild(this.borderSvg);
     workspace.appendChild(this.unmergeBtn);
 
@@ -2582,19 +2643,6 @@ class PolygonMergedTab {
     this.createMergedVertexHandles();
 
     this.attachDragListeners();
-  }
-
-  // ── Send union polygon shape to the merged webview ───────────────────────
-  _sendMergedShapeUpdate() {
-    if (!this.mergedWebview || !this._webviewReady) return;
-    const ox = this.position.x, oy = this.position.y;
-    const w  = this.size.width,  h  = this.size.height;
-    const polys = this.tabs.map(t => tabToPolygon(t, ox, oy));
-    let unionPoly = polys[0];
-    for (let i = 1; i < polys.length; i++) unionPoly = polygonUnionOutline(unionPoly, polys[i]);
-    const vertices = unionPoly.map(p => ({ x: p.x / w, y: p.y / h }));
-    const payload  = JSON.stringify({ shape: 'polygon', vertices, holes: null, width: w, height: h });
-    this.mergedWebview.executeJavaScript(`window.__shapeUpdate && window.__shapeUpdate(${payload})`);
   }
 
   // ── Border stroke is the exclusive drag handle for the merged group ─────────
@@ -2613,7 +2661,7 @@ class PolygonMergedTab {
     draggedTab = this;
     this.borderPolyEls.forEach(p => p.style.cursor = 'grabbing');
     // Disable webview hit-testing while dragging so mousemove isn't swallowed
-    if (this.mergedWebview) this.mergedWebview.style.pointerEvents = 'none';
+    this.tabs.forEach(t => t.webview.style.pointerEvents = 'none');
 
     // Use the border SVG position as the drag anchor
     const svgRect = this.borderSvg.getBoundingClientRect();
@@ -2633,7 +2681,7 @@ class PolygonMergedTab {
       ev.preventDefault();
       draggedTab = null;
       this.borderPolyEls.forEach(p => p.style.cursor = 'grab');
-      if (this.mergedWebview) this.mergedWebview.style.pointerEvents = '';
+      this.tabs.forEach(t => t.webview.style.pointerEvents = 'auto');
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup',   onMouseUp);
     };
@@ -2647,21 +2695,18 @@ class PolygonMergedTab {
     this.position.y = Math.max(0, Math.min(y, wsH - this.size.height));
     const px = this.position.x, py = this.position.y;
 
-    // Keep hidden pane element positions in sync so unmerge restores correct coords.
+    // Move each pane element by its stored offset from the union origin
     this.tabs.forEach((t, i) => {
       const nx = px + this.paneOffsets[i].x;
       const ny = py + this.paneOffsets[i].y;
       t.element.style.left = nx + 'px';
       t.element.style.top  = ny + 'px';
+      // Keep TabWindow position state in sync so unmerge restores correct coords
       t.position.x = nx;
       t.position.y = ny;
     });
 
-    // Move the merged webview container and overlay elements.
-    if (this.mergedContainer) {
-      this.mergedContainer.style.left = px + 'px';
-      this.mergedContainer.style.top  = py + 'px';
-    }
+    // Move overlay elements
     this.borderSvg.style.left  = px + 'px';
     this.borderSvg.style.top   = py + 'px';
     this.unmergeBtn.style.left = (px + this.size.width / 2) + 'px';
@@ -2677,12 +2722,10 @@ class PolygonMergedTab {
     });
     this.tabs.forEach(t => t.element.classList.add('active'));
     activeTab = this;
-    urlInput.value = this.url;
+    urlInput.value = this.tabs[this._focusedPaneIdx].url;
 
     const paneZ = String(++_zTop);
-    // Set z-index on hidden pane elements so getEntryMaxStackZ still works.
     this.tabs.forEach(t => { t.element.style.zIndex = paneZ; });
-    if (this.mergedContainer) this.mergedContainer.style.zIndex = paneZ;
     this.borderSvg.style.zIndex  = String(++_zTop);
     this.unmergeBtn.style.zIndex = String(++_zTop);
 
@@ -2711,8 +2754,7 @@ class PolygonMergedTab {
     }
     const index = tabs.indexOf(this);
     if (index > -1) tabs.splice(index, 1);
-    // Remove the merged webview and all original pane elements.
-    if (this.mergedContainer) { this.mergedContainer.remove(); this.mergedContainer = null; this.mergedWebview = null; }
+    // All original pane elements are permanently closed
     this.tabs.forEach(t => t.element.remove());
     this.removeMergedVertexHandles();
     this.borderSvg.remove();
@@ -2732,8 +2774,7 @@ class PolygonMergedTab {
     const index = tabs.indexOf(this);
     if (index > -1) tabs.splice(index, 1);
 
-    // Remove the merged webview and overlay nodes — original pane elements stay in the DOM.
-    if (this.mergedContainer) { this.mergedContainer.remove(); this.mergedContainer = null; this.mergedWebview = null; }
+    // Remove only the overlay nodes — original pane elements stay in the DOM
     this.removeMergedVertexHandles();
     this.borderSvg.remove();
     this.unmergeBtn.remove();
@@ -2779,14 +2820,55 @@ class PolygonMergedTab {
     if (gi > -1) tabs.splice(gi, 1);
     newTab.isMerged = true;
 
-    // Hide new pane element and redirect its activate().
-    newTab.element.style.display = 'none';
+    // Suppress ::after SVG border on new pane
+    const suppressAfter = (tab) => {
+      const styleEl = document.getElementById(`tab-style-${tab.id}`);
+      if (!styleEl) return null;
+      const saved = styleEl.textContent;
+      const sel = `.tab-window.shape-${tab.shape}[data-tab-id="${tab.id}"]`;
+      styleEl.textContent = `${sel}::after { display:none; }\n${sel}.active::after { display:none; }`;
+      return saved;
+    };
+    this._savedStyles.push(suppressAfter(newTab));
+
+    // Apply merge CSS to new pane element
+    const el = newTab.element;
+    el.style.border        = 'none';
+    el.style.boxShadow     = 'none';
+    if (newTab.shape !== 'circle') el.style.borderRadius = '0';
+    el.style.filter        = 'none';
+    el.style.transform     = 'none';
+    el.style.transition    = 'none';
+    el.style.pointerEvents = 'none';
+    newTab.webview.style.pointerEvents = 'auto';
+
+    // Redirect activate to this merged tab
     const origActivate = newTab.activate.bind(newTab);
     this._origActivates.push(origActivate);
     newTab.activate = () => { this._focusedPaneIdx = this.tabs.indexOf(newTab); this.activate(); };
 
-    // Rebuild the merged webview and overlay with the expanded union polygon.
-    if (this.mergedContainer) { this.mergedContainer.remove(); this.mergedContainer = null; this.mergedWebview = null; this._webviewReady = false; }
+    // Focus listener — track which pane is focused
+    const onFocus = () => {
+      this._focusedPaneIdx = this.tabs.indexOf(newTab);
+      if (activeTab === this) urlInput.value = newTab.url;
+    };
+    newTab.webview.addEventListener('focus', onFocus);
+    this._onFocus.push(onFocus);
+
+    // Navigate listener — track URL changes while browsing
+    const onNavigate = (e) => {
+      newTab.url = e.url;
+      const tIdx = this.tabs.indexOf(newTab);
+      if (activeTab === this && this._focusedPaneIdx === tIdx) urlInput.value = e.url;
+    };
+    newTab.webview.addEventListener('did-navigate',         onNavigate);
+    newTab.webview.addEventListener('did-navigate-in-page', onNavigate);
+    this._onNavigate.push(onNavigate);
+
+    // Reapply seam clips for all panes
+    this._applySeamClips();
+
+    // Rebuild SVG overlay (border + unmerge button)
     this._removeHoverListeners();
     this._removeDragListeners();
     this.removeMergedVertexHandles();
@@ -2803,18 +2885,39 @@ class PolygonMergedTab {
     const idx = this.tabs.indexOf(tab);
     if (idx === -1) return;
 
-    // Restore activate() on the removed pane.
-    const origAct = this._origActivates[idx];
+    // Detach listeners added in addTab / applyMergeStyle
+    const onFocus    = this._onFocus[idx];
+    const onNavigate = this._onNavigate[idx];
+    const origAct    = this._origActivates[idx];
+    if (onFocus) tab.webview.removeEventListener('focus', onFocus);
+    if (onNavigate) {
+      tab.webview.removeEventListener('did-navigate',         onNavigate);
+      tab.webview.removeEventListener('did-navigate-in-page', onNavigate);
+    }
     if (origAct) tab.activate = origAct;
 
-    // Show the removed pane element again and restore its shape.
-    tab.element.style.display = '';
+    // Restore pane CSS
+    const el = tab.element;
+    el.style.clipPath      = '';
+    el.style.border        = '';
+    el.style.boxShadow     = '';
+    el.style.borderRadius  = '';
+    el.style.filter        = '';
+    el.style.transform     = '';
+    el.style.transition    = '';
+    el.style.pointerEvents = '';
+    tab.webview.style.pointerEvents = '';
+    const styleEl = document.getElementById(`tab-style-${tab.id}`);
+    if (styleEl && this._savedStyles[idx]) styleEl.textContent = this._savedStyles[idx];
     tab.updateShapeClipPath();
 
-    // Splice pane out of all parallel arrays.
+    // Splice pane out of all parallel arrays
     this.tabs.splice(idx, 1);
     this.paneOffsets.splice(idx, 1);
     this.origRects.splice(idx, 1);
+    this._savedStyles.splice(idx, 1);
+    this._onFocus.splice(idx, 1);
+    this._onNavigate.splice(idx, 1);
     this._origActivates.splice(idx, 1);
 
     if (this._focusedPaneIdx >= this.tabs.length) this._focusedPaneIdx = this.tabs.length - 1;
@@ -2823,13 +2926,13 @@ class PolygonMergedTab {
     tab.element.classList.remove('active');
     tabs.push(tab);
 
-    // If only one pane remains, dissolve the merged group entirely.
+    // If only one pane remains, dissolve the merged group entirely
     if (this.tabs.length === 1) {
       this.unmerge();
       return;
     }
 
-    // Recompute union bounding box from remaining pane positions.
+    // Recompute union bounding box from remaining pane positions
     const newOx  = Math.min(...this.tabs.map(t => t.position.x));
     const newOy  = Math.min(...this.tabs.map(t => t.position.y));
     const newOx2 = Math.max(...this.tabs.map(t => t.position.x + t.size.width));
@@ -2840,8 +2943,8 @@ class PolygonMergedTab {
     this.position = { x: newOx, y: newOy };
     this.size     = { width: newOx2 - newOx, height: newOy2 - newOy };
 
-    // Rebuild merged webview and overlay with the contracted union polygon.
-    if (this.mergedContainer) { this.mergedContainer.remove(); this.mergedContainer = null; this.mergedWebview = null; this._webviewReady = false; }
+    this._applySeamClips();
+
     this._removeHoverListeners();
     this._removeDragListeners();
     this.removeMergedVertexHandles();
@@ -3020,16 +3123,7 @@ class PolygonMergedTab {
     this.unmergeBtn.style.left = (newOx + w / 2) + 'px';
     this.unmergeBtn.style.top  = (newOy + 4) + 'px';
 
-    // Update merged webview container geometry and clip-path.
-    if (this.mergedContainer) {
-      const clipPct = unionPoly.map(p => `${(p.x / w * 100).toFixed(3)}% ${(p.y / h * 100).toFixed(3)}%`).join(', ');
-      this.mergedContainer.style.left      = newOx + 'px';
-      this.mergedContainer.style.top       = newOy + 'px';
-      this.mergedContainer.style.width     = w + 'px';
-      this.mergedContainer.style.height    = h + 'px';
-      this.mergedContainer.style.clipPath  = `polygon(${clipPct})`;
-      this._sendMergedShapeUpdate();
-    }
+    this._applySeamClips();
   }
 
   startMergedVertexDrag(e, handleIdx) {
@@ -3039,7 +3133,7 @@ class PolygonMergedTab {
     if (!tag) return;
 
     vertexDraggingTab = this;
-    if (this.mergedWebview) this.mergedWebview.style.pointerEvents = 'none';
+    this.tabs.forEach(t => { t.webview.style.pointerEvents = 'none'; });
 
     const onMouseMove = (ev) => {
       ev.preventDefault();
@@ -3056,7 +3150,7 @@ class PolygonMergedTab {
     const onMouseUp = (ev) => {
       ev.preventDefault();
       vertexDraggingTab = null;
-      if (this.mergedWebview) this.mergedWebview.style.pointerEvents = '';
+      this.tabs.forEach(t => { t.webview.style.pointerEvents = 'auto'; });
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup',   onMouseUp);
     };
@@ -3068,8 +3162,10 @@ class PolygonMergedTab {
   changeShape()  { console.log('Cannot change shape of a polygon merged tab'); }
   updateTitle()  { /* no-op */ }
   updateUrl(url) {
+    const t = this.tabs[this._focusedPaneIdx];
+    t.url = url;
+    if (t.webview) t.webview.src = url;
     this.url = url;
-    if (this.mergedWebview) this.mergedWebview.src = url;
   }
 }
 
@@ -3700,6 +3796,17 @@ function _addMergeHighlight(candidate) {
     candidate.borderSvg.style.filter = 'drop-shadow(0 0 12px rgba(0, 120, 212, 0.7))';
   } else {
     candidate.element.classList.add('merge-candidate');
+    // Directly set inline filter so the blue glow works regardless of whether
+    // the shape already has an inline filter (rectangle/rounded set one in changeShape,
+    // which a stylesheet !important rule may not reliably override in Electron).
+    candidate._savedMergeFilter = candidate.element.style.filter;
+    candidate.element.style.filter = 'drop-shadow(0 0 12px rgba(0, 120, 212, 0.7))';
+    // Also turn the ::after border blue via the injected style tag (if present).
+    const styleEl = document.getElementById(`tab-style-${candidate.id}`);
+    if (styleEl) {
+      const sel = `.tab-window.shape-${candidate.shape}[data-tab-id="${candidate.id}"]`;
+      styleEl.textContent += `\n${sel}.merge-candidate::after { background: #0078d4; }`;
+    }
   }
 }
 
@@ -3709,6 +3816,11 @@ function _removeMergeHighlight(candidate) {
     candidate.borderSvg.style.filter = '';
   } else {
     candidate.element.classList.remove('merge-candidate');
+    // Restore the filter that was in place before highlighting.
+    candidate.element.style.filter = candidate._savedMergeFilter ?? '';
+    candidate._savedMergeFilter = undefined;
+    // Rebuild the injected style tag without the merge-candidate rule.
+    candidate.updateShapeClipPath();
   }
 }
 
@@ -3827,7 +3939,9 @@ function applyBooleanDifference(survivingTab, deletedTab) {
     const sA = { x: survivingTab.position.x, y: survivingTab.position.y,
                  w: survivingTab.size.width,  h: survivingTab.size.height };
 
-    if (rectLike(deletedTab.shape)) {
+    if (rectLike(deletedTab.shape) &&
+        survivingTab._isRectangular(survivingTab.activeVertices) &&
+        deletedTab._isRectangular(deletedTab.activeVertices)) {
       const sB = { x: deletedTab.position.x, y: deletedTab.position.y,
                    w: deletedTab.size.width,  h: deletedTab.size.height };
       if (sB.x >= sA.x && sB.y >= sA.y &&
@@ -4323,14 +4437,27 @@ function applyBooleanDifference(survivingTab, deletedTab) {
   }
 
   if (rectLike(survivingTab.shape) && rectLike(deletedTab.shape)) {
-    const rA = { x: survivingTab.position.x, y: survivingTab.position.y,
-                 w: survivingTab.size.width,  h: survivingTab.size.height };
-    const rB = { x: deletedTab.position.x,   y: deletedTab.position.y,
-                 w: deletedTab.size.width,    h: deletedTab.size.height };
+    const survivingDistorted = !survivingTab._isRectangular(survivingTab.activeVertices);
+    const deletedDistorted   = !deletedTab._isRectangular(deletedTab.activeVertices);
 
-    const diffPoly = computeRectDifference(rA, rB);
-    console.log('[CARVE] rect+rect — rA:', JSON.stringify(rA), 'rB:', JSON.stringify(rB));
-    console.log('[CARVE] rect+rect — diffPoly:', diffPoly ? JSON.stringify(diffPoly) : 'null (no change)');
+    let diffPoly;
+    if (survivingDistorted || deletedDistorted) {
+      // At least one shape has been freely distorted — use actual vertex geometry.
+      const toAbs = tab => tab.activeVertices.map(v => ({
+        x: tab.position.x + v.x * tab.size.width,
+        y: tab.position.y + v.y * tab.size.height,
+      }));
+      diffPoly = computePolygonDifference(toAbs(survivingTab), toAbs(deletedTab));
+    } else {
+      // Both shapes are axis-aligned rectangles — use the fast rect path.
+      const rA = { x: survivingTab.position.x, y: survivingTab.position.y,
+                   w: survivingTab.size.width,  h: survivingTab.size.height };
+      const rB = { x: deletedTab.position.x,   y: deletedTab.position.y,
+                   w: deletedTab.size.width,    h: deletedTab.size.height };
+      diffPoly = computeRectDifference(rA, rB);
+      console.log('[CARVE] rect+rect — rA:', JSON.stringify(rA), 'rB:', JSON.stringify(rB));
+      console.log('[CARVE] rect+rect — diffPoly:', diffPoly ? JSON.stringify(diffPoly) : 'null (no change)');
+    }
     if (!diffPoly) return;
 
     // Vertex count changes (4 → 6 or 8), so rebuild handles from scratch.
